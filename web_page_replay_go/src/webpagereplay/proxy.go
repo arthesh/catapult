@@ -19,10 +19,7 @@ import (
 
 const errStatus = http.StatusInternalServerError
 
-func makeLogger(req *http.Request, quietMode bool) func(msg string, args ...interface{}) {
-	if quietMode {
-		return func(string, ...interface{}) { }
-	}
+func makeLogger(req *http.Request) func(msg string, args ...interface{}) {
 	prefix := fmt.Sprintf("ServeHTTP(%s): ", req.URL)
 	return func(msg string, args ...interface{}) {
 		log.Print(prefix + fmt.Sprintf(msg, args...))
@@ -66,15 +63,14 @@ func updateDates(h http.Header, now time.Time) {
 
 // NewReplayingProxy constructs an HTTP proxy that replays responses from an archive.
 // The proxy is listening for requests on a port that uses the given scheme (e.g., http, https).
-func NewReplayingProxy(a *Archive, scheme string, transformers []ResponseTransformer, quietMode bool) http.Handler {
-	return &replayingProxy{a, scheme, transformers, quietMode }
+func NewReplayingProxy(a *Archive, scheme string, transformers []ResponseTransformer) http.Handler {
+	return &replayingProxy{a, scheme, transformers}
 }
 
 type replayingProxy struct {
 	a            *Archive
 	scheme       string
 	transformers []ResponseTransformer
-	quietMode    bool
 }
 
 func (proxy *replayingProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -93,8 +89,12 @@ func (proxy *replayingProxy) ServeHTTP(w http.ResponseWriter, req *http.Request)
 		proxy.a.StartNewReplaySession()
 		return
 	}
+	if req.URL.Path == "/web-page-replay-release-archive" {
+		log.Printf("Received /web-page-replay-release-archive")
+		return
+	}
 	fixupRequestURL(req, proxy.scheme)
-	logf := makeLogger(req, proxy.quietMode)
+	logf := makeLogger(req)
 
 	// Lookup the response in the archive.
 	_, storedResp, err := proxy.a.FindRequest(req)
@@ -183,8 +183,15 @@ func (proxy *recordingProxy) ServeHTTP(w http.ResponseWriter, req *http.Request)
 		os.Exit(0)
 		return
 	}
+	if req.URL.Path == "/web-page-replay-release-archive" {
+		log.Printf("Closing. Received /web-page-replay-release-archive")
+		if err := proxy.a.Close(); err != nil {
+			log.Printf("Error flushing archive: %v", err)
+		}
+		return
+	}
 	fixupRequestURL(req, proxy.scheme)
-	logf := makeLogger(req, false)
+	logf := makeLogger(req)
 	// https://github.com/golang/go/issues/16036. Server requests always
 	// have non-nil body even for GET and HEAD. This prevents http.Transport
 	// from retrying requests on dead reused conns. Catapult Issue 3706.

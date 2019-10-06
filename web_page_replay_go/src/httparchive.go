@@ -8,28 +8,61 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"fmt"
 	"io"
 	"io/ioutil"
+
+	//"log"
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"strings"
 
-	"github.com/catapult-project/catapult/web_page_replay_go/src/webpagereplay"
+	//"path/filepath"
+	"strings"
+	"time"
+
+	"./webpagereplay"
 	"github.com/urfave/cli"
 )
 
 const usage = "%s [ls|cat|edit|merge|add|addAll] [options] archive_file [output_file] [url]"
 
+/*type CertConfig struct {
+	// Flags common to all commands.
+	certFile, keyFile string
+}
+
+func (certCfg *CertConfig) Flags() []cli.Flag {
+	return []cli.Flag{
+		cli.StringFlag{
+			Name:        "https_cert_file",
+			Value:       "wpr_cert.pem",
+			Usage:       "File containing a PEM-encoded X509 certificate to use with SSL.",
+			Destination: &certCfg.certFile,
+		},
+		cli.StringFlag{
+			Name:        "https_key_file",
+			Value:       "wpr_key.pem",
+			Usage:       "File containing a PEM-encoded private key to use with SSL.",
+			Destination: &certCfg.keyFile,
+		},
+	}
+}*/
+
 type Config struct {
 	method, host, fullPath                              string
 	decodeResponseBody, skipExisting, overwriteExisting bool
+	certConfig                                          CertConfig
+	root_cert                                           tls.Certificate
 }
 
 func (cfg *Config) DefaultFlags() []cli.Flag {
-	return []cli.Flag{
+	return append(cfg.certConfig.Flags(),
 		cli.StringFlag{
 			Name:        "command",
 			Value:       "",
@@ -53,7 +86,8 @@ func (cfg *Config) DefaultFlags() []cli.Flag {
 			Usage:       "Decode/encode response body according to Content-Encoding header.",
 			Destination: &cfg.decodeResponseBody,
 		},
-	}
+	)
+
 }
 
 func (cfg *Config) AddFlags() []cli.Flag {
@@ -272,6 +306,105 @@ func addAll(cfg *Config, archive *webpagereplay.Archive, outfile string, inputFi
 	return writeArchive(archive, outfile)
 }
 
+func certEdit(cfg *Config, archive *webpagereplay.Archive, outfile string, inputFilePath string) error {
+
+	var ipMap = make(map[string][]string)
+
+	for host, ip := range archive.RemoteAddresses {
+		if h, ok := ipMap[ip]; ok {
+			h = append(h, host)
+			ipMap[ip] = h
+		} else {
+			ipMap[ip] = []string{host}
+		}
+	}
+
+	for ip := range ipMap {
+		for i := range ipMap[ip] {
+			currentSANList := []string{ipMap[ip][i]}
+			currentCert, err := x509.ParseCertificate(archive.Certs[ipMap[ip][i]])
+			//derBytes, negotiatedProtocol, ip, err := archive.FindHostTLSConfig(i)
+			if err != nil {
+				return err
+			}
+			for j := range ipMap[ip] {
+				if j != i {
+					certValidationErr := currentCert.VerifyHostname(ipMap[ip][j])
+					if certValidationErr == nil {
+						currentSANList = append(currentSANList, ipMap[ip][j])
+					}
+				}
+			}
+			fakecert, e := x509.ParseCertificate(cfg.root_cert.Certificate[0])
+
+			if e != nil {
+				println(fmt.Sprintf("New Cert DNS : %v", e))
+			}
+
+			newCert, err := CreateDomainRestrictedCert(currentSANList, currentCert, fakecert, cfg.root_cert.PrivateKey)
+			newCertParsed, er := x509.ParseCertificate(newCert)
+			if er == nil {
+				println(fmt.Sprintf("New Cert CN: %s", newCertParsed.Subject.CommonName))
+				println(fmt.Sprintf("Old Cert CN: %s", currentCert.Subject.CommonName))
+
+				for str := range newCertParsed.DNSNames {
+					println(fmt.Sprintf("IP: %s New Cert DNS : %s", ip, newCertParsed.DNSNames[str]))
+				}
+				for str := range currentCert.DNSNames {
+					println(fmt.Sprintf("IP: %s Old Cert DNS : %s", ip, currentCert.DNSNames[str]))
+				}
+			}
+
+			archive.Certs[ipMap[ip][i]] = newCert
+
+		}
+	}
+
+	return writeArchive(archive, outfile)
+}
+
+//Mints a restricted certificate that is only valid for the SANs in the certificateSAN parameter
+func CreateDomainRestrictedCert(certificateSANs []string, rootCert *x509.Certificate, fakecert *x509.Certificate, rootKey crypto.PrivateKey) ([]byte, error) {
+	template := x509.Certificate{
+
+		SerialNumber: rootCert.SerialNumber,
+
+		Subject: pkix.Name{
+
+			CommonName: certificateSANs[0],
+		},
+
+		Issuer: fakecert.Subject,
+
+		NotBefore: time.Now(),
+
+		NotAfter: time.Now().Add(time.Hour * 24 * 180),
+
+		KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCRLSign,
+
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+
+		BasicConstraintsValid: true,
+
+		IsCA: true,
+
+		AuthorityKeyId: rootCert.AuthorityKeyId,
+
+		CRLDistributionPoints: rootCert.CRLDistributionPoints,
+
+		IssuingCertificateURL: rootCert.IssuingCertificateURL,
+
+		DNSNames: certificateSANs,
+
+		PublicKey: rootCert.PublicKey,
+	}
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, fakecert, fakecert.PublicKey, rootKey)
+
+	return derBytes, err
+
+}
+
 // compressResponse compresses resp.Body in place according to resp's Content-Encoding header.
 func compressResponse(resp *http.Response) error {
 	ce := strings.ToLower(resp.Header.Get("Content-Encoding"))
@@ -295,6 +428,7 @@ func compressResponse(resp *http.Response) error {
 	return nil
 }
 
+/*
 func main() {
 	progName := filepath.Base(os.Args[0])
 	cfg := &Config{}
@@ -309,6 +443,15 @@ func main() {
 		return func(c *cli.Context) error {
 			if len(c.Args()) != wantArgs {
 				return fmt.Errorf("Expected %d arguments but got %d", wantArgs, len(c.Args()))
+			}
+			cfg.certConfig.certFile = "wpr_cert.pem"
+			cfg.certConfig.keyFile = "wpr_key.pem"
+			log.Printf("Loading cert from %v\n", cfg.certConfig.certFile)
+			log.Printf("Loading key from %v\n", cfg.certConfig.keyFile)
+			var err error
+			cfg.root_cert, err = tls.LoadX509KeyPair(cfg.certConfig.certFile, cfg.certConfig.keyFile)
+			if err != nil {
+				return fmt.Errorf("error opening cert or key files: %v", err)
 			}
 			return nil
 		}
@@ -329,7 +472,7 @@ func main() {
 			ArgsUsage: "archive",
 			Flags:     cfg.DefaultFlags(),
 			Before:    checkArgs("ls", 1),
-			Action:    func(c *cli.Context) error {
+			Action: func(c *cli.Context) error {
 				return list(cfg, loadArchiveOrDie(c, 0), false)
 			},
 		},
@@ -339,7 +482,7 @@ func main() {
 			ArgsUsage: "archive",
 			Flags:     cfg.DefaultFlags(),
 			Before:    checkArgs("cat", 1),
-			Action:    func(c *cli.Context) error {
+			Action: func(c *cli.Context) error {
 				return list(cfg, loadArchiveOrDie(c, 0), true)
 			},
 		},
@@ -349,7 +492,7 @@ func main() {
 			ArgsUsage: "input_archive output_archive",
 			Flags:     cfg.DefaultFlags(),
 			Before:    checkArgs("edit", 2),
-			Action:    func(c *cli.Context) error {
+			Action: func(c *cli.Context) error {
 				return edit(cfg, loadArchiveOrDie(c, 0), c.Args().Get(1))
 			},
 		},
@@ -358,7 +501,7 @@ func main() {
 			Usage:     "Merge the requests/responses of two archives",
 			ArgsUsage: "base_archive input_archive output_archive",
 			Before:    checkArgs("merge", 3),
-			Action:    func(c *cli.Context) error {
+			Action: func(c *cli.Context) error {
 				return merge(cfg, loadArchiveOrDie(c, 0), loadArchiveOrDie(c, 1), c.Args().Get(2))
 			},
 		},
@@ -367,13 +510,13 @@ func main() {
 			Usage:     "Add a simple GET request from the network to the archive",
 			ArgsUsage: "input_archive output_archive [urls...]",
 			Flags:     cfg.AddFlags(),
-			Before:    func(c *cli.Context) error {
+			Before: func(c *cli.Context) error {
 				if len(c.Args()) < 3 {
 					return fmt.Errorf("Expected at least 3 arguments but got %d", len(c.Args()))
 				}
 				return nil
 			},
-			Action:    func(c *cli.Context) error {
+			Action: func(c *cli.Context) error {
 				return add(cfg, loadArchiveOrDie(c, 0), c.Args().Get(1), c.Args()[2:])
 			},
 		},
@@ -383,8 +526,18 @@ func main() {
 			ArgsUsage: "input_archive output_archive urls_file",
 			Flags:     cfg.AddFlags(),
 			Before:    checkArgs("add", 3),
-			Action:    func(c *cli.Context) error {
+			Action: func(c *cli.Context) error {
 				return addAll(cfg, loadArchiveOrDie(c, 0), c.Args().Get(1), c.Args().Get(2))
+			},
+		},
+		cli.Command{
+			Name:      "certEdit",
+			Usage:     "Transforms the certificates in the archives to only those SANs that were served from the IP address",
+			ArgsUsage: "input_archive output_archive urls_file",
+			Flags:     cfg.AddFlags(),
+			Before:    checkArgs("certEdit", 3),
+			Action: func(c *cli.Context) error {
+				return certEdit(cfg, loadArchiveOrDie(c, 0), c.Args().Get(1), c.Args().Get(2))
 			},
 		},
 	}
@@ -399,3 +552,4 @@ func main() {
 		os.Exit(1)
 	}
 }
+*/

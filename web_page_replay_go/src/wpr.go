@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/catapult-project/catapult/web_page_replay_go/src/webpagereplay"
+	"./webpagereplay"
 	"github.com/urfave/cli"
 	"golang.org/x/net/http2"
 )
@@ -48,9 +48,31 @@ const longUsage = `
    After: Remove the test root CA.
      $ GOPATH=$PWD go run src/wpr.go removeroot`
 
+/*type CertConfig struct {
+	// Flags common to all commands.
+	certFile, keyFile string
+}*/
+
 type CertConfig struct {
 	// Flags common to all commands.
 	certFile, keyFile string
+}
+
+func (certCfg *CertConfig) Flags() []cli.Flag {
+	return []cli.Flag{
+		cli.StringFlag{
+			Name:        "https_cert_file",
+			Value:       "wpr_cert.pem",
+			Usage:       "File containing a PEM-encoded X509 certificate to use with SSL.",
+			Destination: &certCfg.certFile,
+		},
+		cli.StringFlag{
+			Name:        "https_key_file",
+			Value:       "wpr_key.pem",
+			Usage:       "File containing a PEM-encoded private key to use with SSL.",
+			Destination: &certCfg.keyFile,
+		},
+	}
 }
 
 type CommonConfig struct {
@@ -80,7 +102,6 @@ type ReplayCommand struct {
 	// Custom flags for replay.
 	rulesFile                            string
 	serveResponseInChronologicalSequence bool
-	quietMode                            bool
 }
 
 type RootCACommand struct {
@@ -89,7 +110,7 @@ type RootCACommand struct {
 	cmd        cli.Command
 }
 
-func (certCfg *CertConfig) Flags() []cli.Flag {
+/*func (certCfg *CertConfig) Flags() []cli.Flag {
 	return []cli.Flag{
 		cli.StringFlag{
 			Name:        "https_cert_file",
@@ -104,7 +125,7 @@ func (certCfg *CertConfig) Flags() []cli.Flag {
 			Destination: &certCfg.keyFile,
 		},
 	}
-}
+}*/
 
 func (common *CommonConfig) Flags() []cli.Flag {
 	return append(common.certConfig.Flags(),
@@ -204,12 +225,6 @@ func (r *ReplayCommand) Flags() []cli.Flag {
 				"recorded response, and the second request with the " +
 				"second recorded response.",
 			Destination: &r.serveResponseInChronologicalSequence,
-		},
-		cli.BoolFlag{
-			Name:        "quiet_mode",
-			Usage:       "quiets the logging output by not logging the "+
-			  "ServeHTTP url call and responses",
-			Destination: &r.quietMode,
 		})
 }
 
@@ -424,8 +439,8 @@ func (r *ReplayCommand) Run(c *cli.Context) {
 		log.Printf("Loaded replay rules from %s", r.rulesFile)
 	}
 
-	httpHandler := webpagereplay.NewReplayingProxy(archive, "http", r.common.transformers, r.quietMode)
-	httpsHandler := webpagereplay.NewReplayingProxy(archive, "https", r.common.transformers, r.quietMode)
+	httpHandler := webpagereplay.NewReplayingProxy(archive, "http", r.common.transformers)
+	httpsHandler := webpagereplay.NewReplayingProxy(archive, "https", r.common.transformers)
 	tlsconfig, err := webpagereplay.ReplayTLSConfig(r.common.root_cert, archive)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating TLSConfig: %v", err)

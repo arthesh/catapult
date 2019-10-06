@@ -9,8 +9,11 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+
+	//"crypto/x509/pkix"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -53,7 +56,7 @@ func getRootCert(root tls.Certificate) (*x509.Certificate, error) {
 }
 
 // Mints a dummy server cert when the real one is not recorded.
-func MintDummyCertificate(serverName string, rootCert *x509.Certificate, rootKey crypto.PrivateKey) ([]byte, string, error) {
+func MintDummyCertificate(serverName string, rootCert *x509.Certificate, rootKey crypto.PrivateKey) ([]byte, string, string, error) {
 	template := rootCert
 	if ip := net.ParseIP(serverName); ip != nil {
 		template.IPAddresses = []net.IP{ip}
@@ -62,19 +65,20 @@ func MintDummyCertificate(serverName string, rootCert *x509.Certificate, rootKey
 	}
 	var buf [20]byte
 	if _, err := io.ReadFull(rand.Reader, buf[:]); err != nil {
-		return nil, "", fmt.Errorf("create cert failed: %v", err)
+		return nil, "", "", fmt.Errorf("create cert failed: %v", err)
 	}
 	template.SerialNumber.SetBytes(buf[:])
 	template.Issuer = template.Subject
 	derBytes, err := x509.CreateCertificate(rand.Reader, template, template, template.PublicKey, rootKey)
 	if err != nil {
-		return nil, "", fmt.Errorf("create cert failed: %v", err)
+		return nil, "", "", fmt.Errorf("create cert failed: %v", err)
 	}
-	return derBytes, "", err
+	//return derBytes, "", net.ParseIP(serverName).String(), err
+	return derBytes, "", "", err
 }
 
 // Returns DER encoded server cert.
-func MintServerCert(serverName string, rootCert *x509.Certificate, rootKey crypto.PrivateKey) ([]byte, string, error) {
+func MintServerCert(serverName string, rootCert *x509.Certificate, rootKey crypto.PrivateKey) ([]byte, string, string, error) {
 	dialer := &net.Dialer{
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
@@ -84,11 +88,84 @@ func MintServerCert(serverName string, rootCert *x509.Certificate, rootKey crypt
 		NextProtos: []string{"h2", "http/1.1"},
 	})
 	if err != nil {
-		return nil, "", fmt.Errorf("Couldn't reach host %s: %v", serverName, err)
+		return nil, "", "", fmt.Errorf("Couldn't reach host %s: %v", serverName, err)
 	}
 	defer conn.Close()
 	conn.Handshake()
+	ip := conn.RemoteAddr()
+	log.Print(fmt.Sprintf("%s ", serverName) + fmt.Sprintf("%s ", ip))
 	template := conn.ConnectionState().PeerCertificates[0]
+	/*subject := "dummy"
+	if serverName == "www.msn.com" {
+		subject = "www.msn.com"
+	} else {
+		subject = conn.ConnectionState().PeerCertificates[0].Subject.CommonName
+	}
+	template := x509.Certificate{
+
+		SerialNumber: conn.ConnectionState().PeerCertificates[0].SerialNumber,
+
+		Subject: pkix.Name{
+
+			CommonName: subject,
+		},
+
+		Issuer: rootCert.Subject,
+
+		NotBefore: time.Now(),
+
+		NotAfter: time.Now().Add(time.Hour * 24 * 180),
+
+		KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCRLSign,
+
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+
+		BasicConstraintsValid: true,
+
+		IsCA: true,
+
+		AuthorityKeyId: conn.ConnectionState().PeerCertificates[0].AuthorityKeyId,
+
+		CRLDistributionPoints: conn.ConnectionState().PeerCertificates[0].CRLDistributionPoints,
+
+		IssuingCertificateURL: conn.ConnectionState().PeerCertificates[0].IssuingCertificateURL,
+
+		DNSNames: []string{serverName},
+
+		PublicKey: rootCert.PublicKey,
+	}*/
+
+	/*
+
+	   hosts := strings.Split(*host, ",")
+
+	   for _, h := range hosts {
+
+	   	if ip := net.ParseIP(h); ip != nil {
+
+	   		template.IPAddresses = append(template.IPAddresses, ip)
+
+	   	} else {
+
+	   		template.DNSNames = append(template.DNSNames, h)
+
+	   	}
+
+	   }
+
+
+
+	   if *isCA {
+
+	   	template.IsCA = true
+
+	   	template.KeyUsage |= x509.KeyUsageCertSign
+
+	   }
+
+	*/
+
+	//derBytes, err := x509.CreateCertificate(rand.Reader, &template, rootCert, rootCert.PublicKey, rootKey)
 
 	template.Subject.CommonName = serverName
 	template.NotBefore = time.Now()
@@ -98,7 +175,7 @@ func MintServerCert(serverName string, rootCert *x509.Certificate, rootKey crypt
 	template.PublicKey = rootCert.PublicKey
 	var buf [20]byte
 	if _, err := io.ReadFull(rand.Reader, buf[:]); err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
 	template.SerialNumber.SetBytes(buf[:])
 	template.Issuer = rootCert.Subject
@@ -107,7 +184,7 @@ func MintServerCert(serverName string, rootCert *x509.Certificate, rootKey crypt
 
 	negotiatedProtocol := conn.ConnectionState().NegotiatedProtocol
 	derBytes, err := x509.CreateCertificate(rand.Reader, template, rootCert, template.PublicKey, rootKey)
-	return derBytes, negotiatedProtocol, err
+	return derBytes, negotiatedProtocol, conn.RemoteAddr().String(), err
 }
 
 type tlsProxy struct {
@@ -133,16 +210,17 @@ func (tp *tlsProxy) getReplayConfigForClient(clientHello *tls.ClientHelloInfo) (
 		}, nil
 	}
 
-	derBytes, negotiatedProtocol, err := tp.archive.FindHostTlsConfig(h)
+	derBytes, negotiatedProtocol, ip, err := tp.archive.FindHostTlsConfig(h)
 	tp.mu.Lock()
 	defer tp.mu.Unlock()
 	if err != nil || derBytes == nil {
 		if _, ok := tp.dummy_certs_map[h]; !ok {
-			derBytes, negotiatedProtocol, err = MintDummyCertificate(h, tp.root_cert, tp.root.PrivateKey)
+			derBytes, negotiatedProtocol, ip, err = MintDummyCertificate(h, tp.root_cert, tp.root.PrivateKey)
 			if err != nil {
 				return nil, err
 			}
 			tp.dummy_certs_map[h] = derBytes
+			fmt.Errorf("ip %s", ip)
 		}
 		derBytes = tp.dummy_certs_map[h]
 	}
@@ -170,7 +248,7 @@ func (tp *tlsProxy) getRecordConfigForClient(clientHello *tls.ClientHelloInfo) (
 			Certificates: []tls.Certificate{*tp.root},
 		}, nil
 	}
-	derBytes, negotiatedProtocol, err := tp.writable_archive.Archive.FindHostTlsConfig(h)
+	derBytes, negotiatedProtocol, ip, err := tp.writable_archive.Archive.FindHostTlsConfig(h)
 	if err == nil && derBytes != nil {
 		return &tls.Config{
 			Certificates: []tls.Certificate{
@@ -182,12 +260,12 @@ func (tp *tlsProxy) getRecordConfigForClient(clientHello *tls.ClientHelloInfo) (
 		}, nil
 	}
 
-	derBytes, negotiatedProtocol, err = MintServerCert(h, tp.root_cert, tp.root.PrivateKey)
+	derBytes, negotiatedProtocol, ip, err = MintServerCert(h, tp.root_cert, tp.root.PrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("create cert failed: %v", err)
 	}
 
-	tp.writable_archive.RecordTlsConfig(h, derBytes, negotiatedProtocol)
+	tp.writable_archive.RecordTlsConfig(h, derBytes, negotiatedProtocol, ip)
 
 	return &tls.Config{
 		Certificates: []tls.Certificate{

@@ -76,18 +76,18 @@ func (r *ConvertorConfig) recordServerCert(scheme string, serverName string, arc
 	if scheme != "https" {
 		return nil
 	}
-	derBytes, negotiatedProtocol, err := archive.Archive.FindHostTlsConfig(serverName)
+	derBytes, negotiatedProtocol, address, err := archive.Archive.FindHostTlsConfig(serverName)
 	if err == nil && derBytes != nil {
 		return err
 	}
-	derBytes, negotiatedProtocol, err = MintServerCert(serverName, r.x509Cert, r.tlsCert.PrivateKey)
+	derBytes, negotiatedProtocol, address, err = MintServerCert(serverName, r.x509Cert, r.tlsCert.PrivateKey)
 	if err != nil {
-		derBytes, negotiatedProtocol, err = MintDummyCertificate(serverName, r.x509Cert, r.tlsCert.PrivateKey)
+		derBytes, negotiatedProtocol, address, err = MintDummyCertificate(serverName, r.x509Cert, r.tlsCert.PrivateKey)
 		if err != nil {
 			return err
 		}
 	}
-	archive.RecordTlsConfig(serverName, derBytes, negotiatedProtocol)
+	archive.RecordTlsConfig(serverName, derBytes, negotiatedProtocol, address)
 	return nil
 }
 
